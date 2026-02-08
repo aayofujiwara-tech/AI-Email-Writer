@@ -131,7 +131,7 @@ def _configure_gemini() -> genai.GenerativeModel:
         print("エラー: 環境変数 GEMINI_API_KEY が設定されていません。", file=sys.stderr)
         sys.exit(1)
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash-latest")
+    return genai.GenerativeModel("models/gemini-1.5-flash")
 
 
 PROMPT_TEMPLATE = """\
