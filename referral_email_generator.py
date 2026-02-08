@@ -38,7 +38,7 @@ VISION_KEYWORDS = [
 
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 15  # seconds
-SCRAPE_DELAY = 15  # seconds between requests (Gemini無料枠RPM制限対策)
+SCRAPE_DELAY = 30  # seconds between requests (Gemini無料枠RPM制限対策)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def scrape_company(url: str, session: requests.Session) -> str:
 
     # トップページのテキスト
     top_text = _extract_text(soup)
-    collected_texts.append(f"=== トップページ ({url}) ===\n{top_text[:3000]}")
+    collected_texts.append(f"=== トップページ ({url}) ===\n{top_text[:1000]}")
 
     # サブページの探索
     subpages = _find_subpages(soup, url)[:3]
@@ -113,7 +113,7 @@ def scrape_company(url: str, session: requests.Session) -> str:
             sub_soup = BeautifulSoup(resp.text, "html.parser")
             sub_text = _extract_text(sub_soup)
             collected_texts.append(
-                f"=== サブページ ({sub_url}) ===\n{sub_text[:3000]}"
+                f"=== サブページ ({sub_url}) ===\n{sub_text[:1000]}"
             )
         except requests.RequestException:
             continue  # サブページの失敗は無視
@@ -176,22 +176,33 @@ PROMPT_TEMPLATE = """\
 """
 
 
+MAX_RETRIES = 3
+RETRY_WAIT = 30  # seconds between retries
+
+
 def generate_email(
     model: genai.GenerativeModel,
     company_name: str,
     scraped_text: str,
 ) -> str:
-    """Gemini API を呼び出してメール本文を生成する。"""
+    """Gemini API を呼び出してメール本文を生成する（最大3回リトライ）。"""
     prompt = PROMPT_TEMPLATE.format(
         company_name=company_name,
         our_mission=OUR_MISSION,
-        scraped_text=scraped_text[:6000],  # トークン制限対策
+        scraped_text=scraped_text[:2000],  # トークン制限・無料枠節約対策
     )
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"[メール生成エラー] {company_name}: {e}"
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                print(f"  -> API エラー (試行 {attempt}/{MAX_RETRIES}): {e}")
+                print(f"     {RETRY_WAIT}秒後にリトライします...")
+                time.sleep(RETRY_WAIT)
+    return f"[メール生成エラー] {company_name}: {last_error}"
 
 
 # ---------------------------------------------------------------------------
