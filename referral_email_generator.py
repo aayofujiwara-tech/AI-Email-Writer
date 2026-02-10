@@ -9,12 +9,16 @@ import os
 import re
 import sys
 import time
+import warnings
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+
+# SSL検証スキップ時の警告を抑制
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 import google.generativeai as genai
 
@@ -49,7 +53,7 @@ VISION_KEYWORDS = [
 
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
-REQUEST_TIMEOUT = 15  # seconds
+REQUEST_TIMEOUT = 30  # seconds
 SCRAPE_DELAY = 2  # seconds between requests (有料枠向け高速設定)
 SCRAPE_TEXT_LIMIT = 10000  # 1ページあたりの取得文字数上限
 
@@ -119,10 +123,13 @@ def _build_session() -> requests.Session:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "ja,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
     })
+    session.verify = False  # SSL証明書エラーによる停止を防止
     return session
 
 
@@ -265,7 +272,7 @@ PROMPT_TEMPLATE = """\
 
 
 MAX_RETRIES = 3
-RETRY_BASE_WAIT = 5  # seconds (指数バックオフ: 5s, 10s, 20s)
+RETRY_BASE_WAIT = 5  # seconds (指数バックオフ: 5s, 15s, 45s)
 
 
 def generate_email(
@@ -287,7 +294,7 @@ def generate_email(
         except Exception as e:
             last_error = e
             if attempt < MAX_RETRIES:
-                wait = RETRY_BASE_WAIT * (2 ** (attempt - 1))  # 5s -> 10s -> 20s
+                wait = RETRY_BASE_WAIT * (3 ** (attempt - 1))  # 5s -> 15s -> 45s
                 print(f"  -> API エラー (試行 {attempt}/{MAX_RETRIES}): {e}")
                 print(f"     {wait}秒後にリトライします...")
                 time.sleep(wait)
@@ -338,16 +345,23 @@ def main() -> None:
     print(f"対象企業数: {len(df)}")
     print("=" * 60)
 
+    success_count = 0
+    error_count = 0
+
     for idx, row in df.iterrows():
         company_name = str(row["company_name"]).strip()
         url = str(row["url"]).strip()
         print(f"\n[{idx + 1}/{len(df)}] {company_name} ({url})")
 
-        # 1. スクレイピング
+        # 1. スクレイピング（失敗しても汎用コンテキストで継続）
         print("  -> Webサイトを取得中...")
-        scraped_text = scrape_company(url, session)
+        try:
+            scraped_text = scrape_company(url, session)
+        except Exception as e:
+            print(f"  -> 予期せぬスクレイピングエラー ({e})、汎用モードで継続")
+            scraped_text = FALLBACK_CONTEXT
 
-        # 2. メール生成
+        # 2. メール生成（エラー時も出力して次へ進む）
         print("  -> メールを生成中...")
         email_md = generate_email(model, company_name, scraped_text)
 
@@ -355,13 +369,20 @@ def main() -> None:
         safe_name = re.sub(r'[\\/*?:"<>|]', "_", company_name)
         out_path = OUTPUT_DIR / f"{safe_name}.md"
         out_path.write_text(email_md, encoding="utf-8")
-        print(f"  -> 保存完了: {out_path}")
+
+        if email_md.startswith("[メール生成エラー]"):
+            error_count += 1
+            print(f"  -> エラー出力: {out_path}")
+        else:
+            success_count += 1
+            print(f"  -> 保存完了: {out_path}")
 
         # レート制限対策
         time.sleep(SCRAPE_DELAY)
 
     print("\n" + "=" * 60)
-    print(f"全件完了。出力先: {OUTPUT_DIR}/")
+    print(f"全件完了。成功: {success_count} 件 / エラー: {error_count} 件")
+    print(f"出力先: {OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":
