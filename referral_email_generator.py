@@ -38,7 +38,7 @@ VISION_KEYWORDS = [
 
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 15  # seconds
-SCRAPE_DELAY = 30  # seconds between requests (Gemini無料枠RPM制限対策)
+SCRAPE_DELAY = 3  # seconds between requests (有料枠向け高速設定)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ PROMPT_TEMPLATE = """\
 
 
 MAX_RETRIES = 3
-RETRY_WAIT = 30  # seconds between retries
+RETRY_BASE_WAIT = 2  # seconds (指数バックオフの基底: 2s, 4s, 8s)
 
 
 def generate_email(
@@ -185,11 +185,11 @@ def generate_email(
     company_name: str,
     scraped_text: str,
 ) -> str:
-    """Gemini API を呼び出してメール本文を生成する（最大3回リトライ）。"""
+    """Gemini API を呼び出してメール本文を生成する（指数バックオフ付きリトライ）。"""
     prompt = PROMPT_TEMPLATE.format(
         company_name=company_name,
         our_mission=OUR_MISSION,
-        scraped_text=scraped_text[:2000],  # トークン制限・無料枠節約対策
+        scraped_text=scraped_text[:2000],
     )
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -199,9 +199,10 @@ def generate_email(
         except Exception as e:
             last_error = e
             if attempt < MAX_RETRIES:
+                wait = RETRY_BASE_WAIT ** attempt  # 2s -> 4s -> 8s
                 print(f"  -> API エラー (試行 {attempt}/{MAX_RETRIES}): {e}")
-                print(f"     {RETRY_WAIT}秒後にリトライします...")
-                time.sleep(RETRY_WAIT)
+                print(f"     {wait}秒後にリトライします...")
+                time.sleep(wait)
     return f"[メール生成エラー] {company_name}: {last_error}"
 
 
