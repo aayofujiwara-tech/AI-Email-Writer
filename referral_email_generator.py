@@ -54,7 +54,7 @@ VISION_KEYWORDS = [
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 30  # seconds
-SCRAPE_DELAY = 2  # seconds between requests (有料枠向け高速設定)
+SCRAPE_DELAY = 7  # seconds between requests
 SCRAPE_TEXT_LIMIT = 10000  # 1ページあたりの取得文字数上限
 
 
