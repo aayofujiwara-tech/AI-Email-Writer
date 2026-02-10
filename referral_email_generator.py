@@ -54,7 +54,7 @@ VISION_KEYWORDS = [
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 30  # seconds
-SCRAPE_DELAY = 7  # seconds between requests
+SCRAPE_DELAY = 5  # seconds between requests
 SCRAPE_TEXT_LIMIT = 10000  # 1ページあたりの取得文字数上限
 
 
@@ -271,8 +271,8 @@ PROMPT_TEMPLATE = """\
 """
 
 
-MAX_RETRIES = 3
-RETRY_BASE_WAIT = 5  # seconds (指数バックオフ: 5s, 15s, 45s)
+RETRY_WAITS = [15, 30, 60]  # seconds (3回リトライの待機時間)
+FINAL_RETRY_WAIT = 60  # seconds (最終試行前の追加待機)
 
 
 def generate_email(
@@ -280,24 +280,34 @@ def generate_email(
     company_name: str,
     scraped_text: str,
 ) -> str:
-    """Gemini API を呼び出してメール本文を生成する（指数バックオフ付きリトライ）。"""
+    """Gemini API を呼び出してメール本文を生成する（粘り強いリトライ付き）。"""
     prompt = PROMPT_TEMPLATE.format(
         company_name=company_name,
         our_mission=OUR_MISSION,
         scraped_text=scraped_text[:SCRAPE_TEXT_LIMIT],
     )
+
+    # 通常リトライ: 15s -> 30s -> 60s
     last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt, wait in enumerate(RETRY_WAITS, start=1):
         try:
             response = model.generate_content(prompt)
             return response.text
         except Exception as e:
             last_error = e
-            if attempt < MAX_RETRIES:
-                wait = RETRY_BASE_WAIT * (3 ** (attempt - 1))  # 5s -> 15s -> 45s
-                print(f"  -> API エラー (試行 {attempt}/{MAX_RETRIES}): {e}")
-                print(f"     {wait}秒後にリトライします...")
-                time.sleep(wait)
+            print(f"  -> API エラー (試行 {attempt}/{len(RETRY_WAITS)}): {e}")
+            print(f"     {wait}秒後にリトライします...")
+            time.sleep(wait)
+
+    # 最終試行: さらに60秒待機してからもう1回だけ試す
+    print(f"  -> 通常リトライ失敗。{FINAL_RETRY_WAIT}秒待機後に最終試行します...")
+    time.sleep(FINAL_RETRY_WAIT)
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        last_error = e
+
     return f"[メール生成エラー] {company_name}: {last_error}"
 
 
@@ -346,7 +356,7 @@ def main() -> None:
     print("=" * 60)
 
     success_count = 0
-    error_count = 0
+    failed_items: list[tuple[str, str, str]] = []  # (company_name, url, scraped_text)
 
     for idx, row in df.iterrows():
         company_name = str(row["company_name"]).strip()
@@ -361,25 +371,48 @@ def main() -> None:
             print(f"  -> 予期せぬスクレイピングエラー ({e})、汎用モードで継続")
             scraped_text = FALLBACK_CONTEXT
 
-        # 2. メール生成（エラー時も出力して次へ進む）
+        # 2. メール生成
         print("  -> メールを生成中...")
         email_md = generate_email(model, company_name, scraped_text)
 
         # 3. ファイル出力
         safe_name = re.sub(r'[\\/*?:"<>|]', "_", company_name)
         out_path = OUTPUT_DIR / f"{safe_name}.md"
-        out_path.write_text(email_md, encoding="utf-8")
 
         if email_md.startswith("[メール生成エラー]"):
-            error_count += 1
-            print(f"  -> エラー出力: {out_path}")
+            failed_items.append((company_name, url, scraped_text))
+            print(f"  -> 失敗。最後にまとめて再実行します。")
         else:
+            out_path.write_text(email_md, encoding="utf-8")
             success_count += 1
             print(f"  -> 保存完了: {out_path}")
 
         # レート制限対策
         time.sleep(SCRAPE_DELAY)
 
+    # --- 失敗企業の一括再実行 ---
+    if failed_items:
+        print("\n" + "=" * 60)
+        print(f"失敗 {len(failed_items)} 件を 60秒待機後にまとめて再実行します...")
+        time.sleep(60)
+
+        for company_name, url, scraped_text in failed_items:
+            print(f"\n[再実行] {company_name} ({url})")
+            email_md = generate_email(model, company_name, scraped_text)
+
+            safe_name = re.sub(r'[\\/*?:"<>|]', "_", company_name)
+            out_path = OUTPUT_DIR / f"{safe_name}.md"
+            out_path.write_text(email_md, encoding="utf-8")
+
+            if email_md.startswith("[メール生成エラー]"):
+                print(f"  -> 再実行も失敗: {out_path}")
+            else:
+                success_count += 1
+                print(f"  -> 再実行成功: {out_path}")
+
+            time.sleep(SCRAPE_DELAY)
+
+    error_count = len(df) - success_count
     print("\n" + "=" * 60)
     print(f"全件完了。成功: {success_count} 件 / エラー: {error_count} 件")
     print(f"出力先: {OUTPUT_DIR}/")
