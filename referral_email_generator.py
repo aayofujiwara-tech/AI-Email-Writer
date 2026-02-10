@@ -36,6 +36,7 @@ VISION_KEYWORDS = [
     "mission", "greeting", "message", "company",
 ]
 
+INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 15  # seconds
 SCRAPE_DELAY = 2  # seconds between requests (有料枠向け高速設定)
@@ -266,12 +267,25 @@ def generate_email(
 # メイン処理
 # ---------------------------------------------------------------------------
 def main() -> None:
-    xlsx_path = Path("companies.xlsx")
     csv_path = Path("companies.csv")
 
-    # Excel が存在すれば自動変換
-    if xlsx_path.exists():
-        preprocess_excel(xlsx_path, csv_path)
+    # input/ フォルダ内の .xlsx ファイルを自動検出して変換
+    INPUT_DIR.mkdir(exist_ok=True)
+    xlsx_files = sorted(INPUT_DIR.glob("*.xlsx"))
+    if xlsx_files:
+        print(f"input/ フォルダ内に {len(xlsx_files)} 件の Excel ファイルを検出:")
+        for f in xlsx_files:
+            print(f"  - {f.name}")
+        # 全 Excel を結合して1つの CSV にする
+        all_frames: list[pd.DataFrame] = []
+        for xlsx_path in xlsx_files:
+            preprocess_excel(xlsx_path, csv_path)
+            all_frames.append(pd.read_csv(csv_path))
+        combined = pd.concat(all_frames, ignore_index=True).drop_duplicates(
+            subset=["url"], keep="first"
+        )
+        combined.to_csv(csv_path, index=False)
+        print(f"統合結果: {len(combined)} 件 -> {csv_path}")
 
     if not csv_path.exists():
         print(f"エラー: {csv_path} が見つかりません。", file=sys.stderr)
