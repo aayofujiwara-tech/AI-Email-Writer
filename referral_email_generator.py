@@ -21,13 +21,24 @@ import google.generativeai as genai
 # ---------------------------------------------------------------------------
 # 定数
 # ---------------------------------------------------------------------------
+OUR_COMPANY = "株式会社AA"
+OUR_SENDER = "役員室室長 藤原洋"
+
 OUR_MISSION = """
-【自社ミッション】
+【自社情報】
+会社名: 株式会社AA
+送信者: 役員室室長 藤原洋
 ビジネスモデル: 居室サブリース × 訪問介護・看護
 ターゲット: 低所得者・生活保護受給者層
 ミッション: 効率的な仕組みを構築し、社会的に不安定な方々へ安定した住まいとケアを届ける。
 私たちは「住まい」と「ケア」を一体で提供することで、制度の狭間に落ちてしまう方々を
 一人でも多く支えたいと考えています。
+""".strip()
+
+FALLBACK_CONTEXT = """
+紹介会社として、日々多くのご利用者様の入居先を探されている中で、
+生活保護受給者様や低所得者様の受け入れ先確保に苦慮されるケースは少なくないと存じます。
+特に、医療的ケアが必要な方や緊急性の高い方の住まいの確保は、業界全体の課題です。
 """.strip()
 
 VISION_KEYWORDS = [
@@ -153,7 +164,8 @@ def scrape_company(url: str, session: requests.Session) -> str:
         resp.encoding = resp.apparent_encoding or "utf-8"
         soup = BeautifulSoup(resp.text, "html.parser")
     except requests.RequestException as e:
-        return f"[スクレイピングエラー] {url}: {e}"
+        print(f"  -> スクレイピング失敗 ({e})、汎用コンテキストで生成します")
+        return FALLBACK_CONTEXT
 
     # トップページのテキスト
     top_text = _extract_text(soup)
@@ -175,7 +187,14 @@ def scrape_company(url: str, session: requests.Session) -> str:
         except requests.RequestException:
             continue  # サブページの失敗は無視
 
-    return "\n\n".join(collected_texts)
+    combined = "\n\n".join(collected_texts)
+
+    # テキストが極端に短い場合は汎用コンテキストで補完
+    plain = re.sub(r"\s+", "", combined)
+    if len(plain) < 100:
+        combined += f"\n\n=== 業界共通コンテキスト ===\n{FALLBACK_CONTEXT}"
+
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +224,17 @@ PROMPT_TEMPLATE = """\
 
 ---
 
+## 絶対ルール（必ず守ること）
+- 送信元の会社名は必ず「株式会社AA」と記載すること。省略・変更・空欄は禁止。
+- 送信者の署名は必ず「株式会社AA 役員室室長 藤原洋」と記載すること。省略・変更・空欄は禁止。
+- 「[会社名]」「[署名]」「[お名前]」等のプレースホルダーは絶対に使わないこと。
+
 ## 指示
 1. 相手企業の「想い（理念・ビジョン）」を読み取り、自社ミッションとの **共通点** を特定してください。
 2. 「なぜ今、御社と組む必要があるのか」という **推論** を含めてください。
-3. 以下の構成でメールを生成してください（Markdown形式）:
+3. 提携の具体的メリットとして、以下の **Win-Win シナリオ** を必ず本文中に1行含めてください:
+   「御社で対応が難しい生活保護受給者様のケースを、弊社のサブリース物件で即座に受け入れるといった、実務レベルの即時連携が可能です」
+4. 以下の構成でメールを生成してください（Markdown形式）:
 
 ```
 ## 件名
@@ -216,25 +242,30 @@ PROMPT_TEMPLATE = """\
 
 ## 本文
 
-（挨拶）
+（{company_name} 御中 への挨拶）
 
-（相手のビジョンへの共感 — 具体的に引用・言及すること）
+（相手のビジョンへの共感 — 具体的に引用・言及すること。
+  Webサイト情報が不十分な場合でも、紹介業界の共通課題に触れて自然に構成すること。
+  「情報が取得できなかった」等の注釈は絶対に入れないこと。）
 
 （自社の紹介と接点 — 居室サブリース×訪問介護の仕組みを簡潔に説明し、
-  相手のビジョンとどう結びつくかを論理的に述べる）
+  相手のビジョンとどう結びつくかを論理的に述べる。Win-Winシナリオを含める。）
 
 （面談の提案 — 具体的な次のステップを提示する）
 
 （結び）
+
+株式会社AA
+役員室室長 藤原洋
 ```
 
-4. トーンは **エモーショナルかつ論理的** に。丁寧なビジネス日本語で書いてください。
-5. メール本文は 400〜600 文字程度に収めてください。
+5. トーンは **エモーショナルかつ論理的** に。丁寧なビジネス日本語で書いてください。
+6. メール本文は 400〜600 文字程度に収めてください。
 """
 
 
 MAX_RETRIES = 3
-RETRY_BASE_WAIT = 2  # seconds (指数バックオフの基底: 2s, 4s, 8s)
+RETRY_BASE_WAIT = 5  # seconds (指数バックオフ: 5s, 10s, 20s)
 
 
 def generate_email(
@@ -256,7 +287,7 @@ def generate_email(
         except Exception as e:
             last_error = e
             if attempt < MAX_RETRIES:
-                wait = RETRY_BASE_WAIT ** attempt  # 2s -> 4s -> 8s
+                wait = RETRY_BASE_WAIT * (2 ** (attempt - 1))  # 5s -> 10s -> 20s
                 print(f"  -> API エラー (試行 {attempt}/{MAX_RETRIES}): {e}")
                 print(f"     {wait}秒後にリトライします...")
                 time.sleep(wait)
