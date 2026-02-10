@@ -38,7 +38,63 @@ VISION_KEYWORDS = [
 
 OUTPUT_DIR = Path("output")
 REQUEST_TIMEOUT = 15  # seconds
-SCRAPE_DELAY = 3  # seconds between requests (有料枠向け高速設定)
+SCRAPE_DELAY = 2  # seconds between requests (有料枠向け高速設定)
+SCRAPE_TEXT_LIMIT = 10000  # 1ページあたりの取得文字数上限
+
+
+# ---------------------------------------------------------------------------
+# Excel → CSV プリプロセス
+# ---------------------------------------------------------------------------
+NAME_HINTS = ["company_name", "社名", "企業名", "会社名", "name", "企業"]
+URL_HINTS = ["url", "hp", "ホームページ", "website", "サイト", "リンク", "link"]
+
+
+def _guess_column(df: pd.DataFrame, hints: list[str]) -> str | None:
+    """列名またはセル内容のパターンから該当列を推測して返す。"""
+    col_lower = {c: str(c).strip().lower() for c in df.columns}
+
+    # 1) 列名がヒントに一致するか
+    for col, name in col_lower.items():
+        if any(h in name for h in hints):
+            return col
+
+    # 2) セルの中身から推測（URL列はhttp を含むかで判定）
+    if hints is URL_HINTS:
+        for col in df.columns:
+            sample = df[col].dropna().astype(str).head(10)
+            if sample.str.contains(r"https?://", case=False).mean() > 0.5:
+                return col
+    return None
+
+
+def preprocess_excel(xlsx_path: Path, csv_path: Path) -> None:
+    """
+    Excel ファイルを読み込み、企業名・URL列を自動判定して
+    標準形式の companies.csv に変換する。
+    """
+    print(f"Excelファイルを検出: {xlsx_path}")
+    df = pd.read_excel(xlsx_path, engine="openpyxl")
+    print(f"  -> 読み込み行数: {len(df)}, 列: {list(df.columns)}")
+
+    name_col = _guess_column(df, NAME_HINTS)
+    url_col = _guess_column(df, URL_HINTS)
+
+    if not name_col or not url_col:
+        print(
+            f"エラー: 企業名またはURL列を特定できませんでした。\n"
+            f"  企業名列候補: {name_col}, URL列候補: {url_col}\n"
+            f"  検出した列: {list(df.columns)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"  -> 企業名列: '{name_col}', URL列: '{url_col}'")
+    out = df[[name_col, url_col]].rename(
+        columns={name_col: "company_name", url_col: "url"}
+    )
+    out = out.dropna(subset=["company_name", "url"])
+    out.to_csv(csv_path, index=False)
+    print(f"  -> {csv_path} に {len(out)} 件書き出しました。")
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +156,7 @@ def scrape_company(url: str, session: requests.Session) -> str:
 
     # トップページのテキスト
     top_text = _extract_text(soup)
-    collected_texts.append(f"=== トップページ ({url}) ===\n{top_text[:1000]}")
+    collected_texts.append(f"=== トップページ ({url}) ===\n{top_text[:SCRAPE_TEXT_LIMIT]}")
 
     # サブページの探索
     subpages = _find_subpages(soup, url)[:3]
@@ -113,7 +169,7 @@ def scrape_company(url: str, session: requests.Session) -> str:
             sub_soup = BeautifulSoup(resp.text, "html.parser")
             sub_text = _extract_text(sub_soup)
             collected_texts.append(
-                f"=== サブページ ({sub_url}) ===\n{sub_text[:1000]}"
+                f"=== サブページ ({sub_url}) ===\n{sub_text[:SCRAPE_TEXT_LIMIT]}"
             )
         except requests.RequestException:
             continue  # サブページの失敗は無視
@@ -189,7 +245,7 @@ def generate_email(
     prompt = PROMPT_TEMPLATE.format(
         company_name=company_name,
         our_mission=OUR_MISSION,
-        scraped_text=scraped_text[:2000],
+        scraped_text=scraped_text[:SCRAPE_TEXT_LIMIT],
     )
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -210,7 +266,13 @@ def generate_email(
 # メイン処理
 # ---------------------------------------------------------------------------
 def main() -> None:
+    xlsx_path = Path("companies.xlsx")
     csv_path = Path("companies.csv")
+
+    # Excel が存在すれば自動変換
+    if xlsx_path.exists():
+        preprocess_excel(xlsx_path, csv_path)
+
     if not csv_path.exists():
         print(f"エラー: {csv_path} が見つかりません。", file=sys.stderr)
         sys.exit(1)

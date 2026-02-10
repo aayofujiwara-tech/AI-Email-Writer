@@ -2,3 +2,4 @@ pandas>=2.0
 beautifulsoup4>=4.12
 requests>=2.31
 google-generativeai>=0.5
+openpyxl>=3.1
